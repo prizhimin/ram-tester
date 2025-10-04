@@ -45,7 +45,7 @@
 ### Прошивка:
 
 ```bash
-avrdude -c usbasp -p m32 -U flash:w:RAM_Tester.hex:i -U lfuse:w:0xFF:m -U hfuse:w:0x99:m
+avrdude -c usbasp -p m32 -U flash:w:ram-tester.hex:i -U lfuse:w:0xFF:m -U hfuse:w:0xC9:m
 ```
 
 ## 🎮 Использование
