@@ -39,14 +39,14 @@
 // Дополнительные пины для DRAM
 #define RAS_PIN PC7
 #define CAS_PIN PC4
-#define DRAM_DIN_PIN   PB0   // Data input (Din)
-#define DRAM_DOUT_PIN  PB1   // Data output (Dout)
+#define DRAM_DOUT_PIN  PB0   // Data output (Dout)
+#define DRAM_DIN_PIN   PB1   // Data input (Din)
 #define DRAM_DIN_MASK  (1 << DRAM_DIN_PIN)
 #define DRAM_DOUT_MASK (1 << DRAM_DOUT_PIN)
 // Константы для временных параметров DRAM
 #define DRAM_RAS_PRECHARGE_US   1
 #define DRAM_CAS_DELAY_US       1
-#define DRAM_REFESH_INTERVAL	64
+#define DRAM_REFRESH_INTERVAL	64
 
 // Типы поддерживаемых микросхем памяти
 typedef enum {
@@ -342,80 +342,72 @@ void configure_memory_controller(memory_type_t type) {
 
 // Запись данных в память
 void memory_write(uint16_t address, uint8_t data) {
-	if (mem_config[current_mem_type].is_dram) {
-		dram_write(address, data);
+	if (mem_config[current_mem_type].use_a13_as_cs) {
+		address |= (1 << 13);
+	}
+		
+	PORTA = address & 0xFF;
+		
+	if (mem_config[current_mem_type].is_dip28) {
+		PORTD = (address >> 8) & 0x7F;
 	} else {
-		if (mem_config[current_mem_type].use_a13_as_cs) {
-			address |= (1 << 13);
-		}
+		PORTD = (PORTD & 0xF0) | ((address >> 8) & 0x0F);
+	}
 		
-		PORTA = address & 0xFF;
+	if (mem_config[current_mem_type].ce_config == 0x01) {
+		PORTC &= ~(1 << CE_PIN);
+	}
 		
-		if (mem_config[current_mem_type].is_dip28) {
-			PORTD = (address >> 8) & 0x7F;
-		} else {
-			PORTD = (PORTD & 0xF0) | ((address >> 8) & 0x0F);
-		}
+	PORTB = data;
+	_delay_us(10);
 		
-		if (mem_config[current_mem_type].ce_config == 0x01) {
-			PORTC &= ~(1 << CE_PIN);
-		}
+	PORTC &= ~(1 << WE_PIN);
+	_delay_us(10);
+	PORTC |= (1 << WE_PIN);
+	_delay_us(10);
 		
-		PORTB = data;
-		_delay_us(10);
-		
-		PORTC &= ~(1 << WE_PIN);
-		_delay_us(10);
-		PORTC |= (1 << WE_PIN);
-		_delay_us(10);
-		
-		if (mem_config[current_mem_type].ce_config == 0x01) {
-			PORTC |= (1 << CE_PIN);
-		}
+	if (mem_config[current_mem_type].ce_config == 0x01) {
+		PORTC |= (1 << CE_PIN);
 	}
 }
 
 // Чтение данных из памяти
 uint8_t memory_read(uint16_t address) {
-	if (mem_config[current_mem_type].is_dram) {
-		return dram_read(address);
-	} else {
-		uint8_t data;
+	uint8_t data;
 		
-		if (mem_config[current_mem_type].use_a13_as_cs) {
-			address |= (1 << 13);
-		}
-		
-		PORTA = address & 0xFF;
-		
-		if (mem_config[current_mem_type].is_dip28) {
-			PORTD = (address >> 8) & 0x7F;
-		} else {
-			PORTD = (PORTD & 0xF0) | ((address >> 8) & 0x0F);
-		}
-		
-		if (mem_config[current_mem_type].ce_config == 0x01) {
-			PORTC &= ~(1 << CE_PIN);
-		}
-		
-		DDRB = 0x00;
-		PORTB = 0xFF;
-		_delay_us(5);
-		
-		PORTC &= ~(1 << OE_PIN);
-		_delay_us(10);
-		data = PINB;
-		PORTC |= (1 << OE_PIN);
-		
-		if (mem_config[current_mem_type].ce_config == 0x01) {
-			PORTC |= (1 << CE_PIN);
-		}
-		
-		DDRB = 0xFF;
-		PORTB = 0x00;
-		
-		return data;
+	if (mem_config[current_mem_type].use_a13_as_cs) {
+		address |= (1 << 13);
 	}
+		
+	PORTA = address & 0xFF;
+		
+	if (mem_config[current_mem_type].is_dip28) {
+		PORTD = (address >> 8) & 0x7F;
+	} else {
+		PORTD = (PORTD & 0xF0) | ((address >> 8) & 0x0F);
+	}
+		
+	if (mem_config[current_mem_type].ce_config == 0x01) {
+		PORTC &= ~(1 << CE_PIN);
+	}
+		
+	DDRB = 0x00;
+	PORTB = 0xFF;
+	_delay_us(5);
+		
+	PORTC &= ~(1 << OE_PIN);
+	_delay_us(10);
+	data = PINB;
+	PORTC |= (1 << OE_PIN);
+		
+	if (mem_config[current_mem_type].ce_config == 0x01) {
+		PORTC |= (1 << CE_PIN);
+	}
+		
+	DDRB = 0xFF;
+	PORTB = 0x00;
+		
+	return data;
 }
 
 // Получение размера памяти в байтах
@@ -447,12 +439,12 @@ void configure_dram_ports(void) {
     DDRA = 0xFF;
     PORTA = 0x00;
     
-    // PORTB: 
-    // PB0 - Din (выход)
-    // PB1 - Dout (вход) 
-    // Остальные - не используются или для других целей
-    DDRB = 0xFF & ~DRAM_DOUT_MASK;  // Все выходы, кроме Dout
-    PORTB = 0x00;
+    // PORTB:
+    // PB0 - Dout (вход)
+    // PB1 - Din (выход)
+    // PB2-PB7 - высокоимпедансное состояние (Z-состояние)
+    DDRB = (1 << DRAM_DIN_PIN);  // Только PB1 как выход, остальные как входы
+    PORTB = 0x00;                // Отключаем подтяжку на всех входах
     
     // PORTC - управляющие сигналы
     DDRC |= (1 << RAS_PIN) | (1 << CAS_PIN) | (1 << WE_PIN);
@@ -646,12 +638,10 @@ void run_dram_tests(memory_type_t type) {
 
     // Просто запускаем тесты последовательно
     if (dram_test_single_bit(type) != UINT_MAX) {
-        power_off_memory();
         return;
     }
     
     if (dram_test_alternating(type) != UINT_MAX) {
-        power_off_memory();
         return;
     }
     
@@ -663,6 +653,7 @@ void run_dram_tests(memory_type_t type) {
 
 // Вывод сообщения об ошибке теста
 void test_failed_message(uint8_t test, uint16_t error_address, uint8_t error_written, uint8_t error_read) {
+	power_off_memory();
 	char test_line[20];
 	sprintf(test_line, "Test %d FAILED       ", test);
 	lcd_print_at(0, 2, test_line);
@@ -683,7 +674,7 @@ void display_progress(uint16_t address) {
 // Вывод сообщения об успешном завершении теста
 void test_complete_message(uint8_t test_number, uint16_t address) {
     char pass_buf[20];
-    sprintf(pass_buf, "Test %d: PASS  %04X", test_number, address);
+    sprintf(pass_buf, "Test %d: PASS    %04X", test_number, address);
     lcd_print_at(0, 2, pass_buf);
 	_delay_ms(500);	
 }
@@ -793,28 +784,15 @@ void run_memory_tests(memory_type_t type) {
         
         for (uint8_t i = 0; i < 4; i++) {
             if (test_functions[i](type) != UINT_MAX) {
-                power_off_memory();
                 return;
             }
         }
-        
+	    power_off_memory();        
         lcd_print_at(0, 2, "ALL TESTS PASSED!   ");
         lcd_print_at(0, 3, "Memory OK!          ");
         _delay_ms(3000);
     }
-    power_off_memory();
 }
-
-// Временные функции для DRAM (заглушки)
-void dram_write(uint16_t address, uint8_t data) {
-	// Заглушка - будет реализована позже
-}
-
-uint8_t dram_read(uint16_t address) {
-	// Заглушка - будет реализована позже
-	return 0;
-}
-
 
 // Главная функция программы
 int main(void) {
