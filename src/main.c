@@ -4,6 +4,14 @@
  *
  * Created: 04.10.2025 15:42:30
  * Author : Прижимин Николай
+ *
+ * Микроконтроллер ATMega32
+ *
+ * Прошивка программы + фьюзы
+ *
+ * Внешний кварц 16 МГц:
+ * avrdude -c usbasp -p m32 -U flash:w:ram-tester.hex:i -U lfuse:w:0xFF:m -U hfuse:w:0xD9:m
+ *
  */
 
 #define F_CPU 16000000UL
