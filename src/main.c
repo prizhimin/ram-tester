@@ -45,12 +45,17 @@
 #define CE_PIN	PC7
 
 // Дополнительные пины для DRAM
-#define RAS_PIN PC7
+/*
+*
+* Пины CAS_PIN и RAS_PIN пересекаются с OE_PIN и CAS_PIN без проблем,
+* т.к. в один момент времени тестируется или статическая память, или динамическая.
+*
+*/
 #define CAS_PIN PC4
-#define DRAM_DOUT_PIN  PB0   // Data output (Dout)
-#define DRAM_DIN_PIN   PB1   // Data input (Din)
-#define DRAM_DIN_MASK  (1 << DRAM_DIN_PIN)
-#define DRAM_DOUT_MASK (1 << DRAM_DOUT_PIN)
+#define RAS_PIN PC7
+#define DRAM_DATA_PIN  PB0   // Выходы Data output (Dout) и Data input (Din) - соединены
+#define DRAM_DATA  (1 << DRAM_DATA_PIN)
+
 // Константы для временных параметров DRAM
 #define DRAM_RAS_PRECHARGE_US   1
 #define DRAM_CAS_DELAY_US       1
@@ -91,9 +96,8 @@ const memory_config_t mem_config[] = {
 	{ 32,		18,		0,		0,	0,			1,		9 }  // 41256
 };
 
-volatile memory_type_t current_mem_type = MEM_6116;
+volatile memory_type_t current_mem_type = MEM_4164;
 volatile uint8_t test_running = 0;
-volatile uint16_t dram_refresh_counter = 0; // Счётчик регенерации DRAM
 
 // Прототипы функций
 
@@ -116,10 +120,11 @@ void lcd_print_at(uint8_t col, uint8_t row, const char *str);
 void lcd_clear(void);
 void display_current_memory_info(void);
 
+// Инициализация системы
+void system_init(void);
+
 // Управление памятью
 void configure_memory_controller(memory_type_t type);
-void memory_write(uint16_t address, uint8_t data);
-uint8_t memory_read(uint16_t address);
 void power_on_memory(void);
 void power_off_memory(void);
 
@@ -129,34 +134,34 @@ uint8_t get_address_lines(memory_type_t type);
 uint8_t is_valid_address(memory_type_t type, uint16_t address);
 void get_dram_address_bits(memory_type_t type, uint8_t* row_bits, uint8_t* col_bits);
 
+// Функции для SRAM
+void sram_memory_write(uint16_t address, uint8_t data);
+uint8_t sram_memory_read(uint16_t address);
+
+// Функции для DRAM
+void configure_dram_ports(void);
+void dram_write_bit(uint8_t row, uint8_t col, uint8_t data_bit);
+uint8_t dram_read_bit(uint8_t row, uint8_t col);
+
 // Тестирование
 void run_memory_tests(memory_type_t type);
-void run_dram_tests(memory_type_t type);
+
+// Тестирование SRAM
+void run_sram_tests(memory_type_t type);
 uint16_t sram_test1(memory_type_t type);
 uint16_t sram_test2(memory_type_t type);
 uint16_t sram_test3(memory_type_t type);
 uint16_t sram_test4(memory_type_t type);
 
+// Тестирование DRAM
+void run_dram_tests(memory_type_t type);
+uint16_t dram_test_single_bit(memory_type_t type);
+uint16_t dram_test_alternating(memory_type_t type);
+
 // Отображение результатов
 void test_failed_message(uint8_t test, uint16_t error_address, uint8_t error_written, uint8_t error_read);
 void test_complete_message(uint8_t test_number, uint16_t address);
 void display_progress(uint16_t address);
-
-// Инициализация системы
-void system_init(void);
-
-// Временные функции для DRAM
-void dram_write(uint16_t address, uint8_t data);
-uint8_t dram_read(uint16_t address);
-
-// Функции для DRAM
-void configure_dram_ports(void);
-void dram_refresh_cycle(uint8_t row);
-void dram_write_bit(uint8_t row, uint8_t col, uint8_t data_bit);
-uint8_t dram_read_bit(uint8_t row, uint8_t col);
-void dram_full_refresh(memory_type_t type);
-uint16_t dram_test_single_bit(memory_type_t type);
-uint16_t dram_test_alternating(memory_type_t type);
 
 
 /* ==================== РЕАЛИЗАЦИЯ ФУНКЦИЙ ==================== */
@@ -248,7 +253,7 @@ void lcd_init(void) {
 	lcd_send_byte(0x01, 0);
 	_delay_ms(2);
 	lcd_send_byte(0x06, 0);
-	_delay_ms(1);
+	_ddelay_ms(1);
 }
 
 // Вывод строки на LCD
@@ -278,7 +283,7 @@ void display_current_memory_info(void) {
 		"6116 (2Kx8)  ", "6164 (8Kx8)  ", "6264 (8Kx8)  ", "62256 (32Kx8)",
 		"2118 (16Kx1)", "4164 (64Kx1)  ", "41256 (256Kx1)"
 	};
-	
+
 	lcd_clear();
 	lcd_print_at(0, 0, "RAM Tester v1.1     ");
 	lcd_print_at(0, 1, "Type:               ");
@@ -290,6 +295,48 @@ void display_current_memory_info(void) {
 	} else {
 		lcd_print_at(0, 2, "Status: READY       ");
 		lcd_print_at(0, 3, "SEL:Type START:Test ");
+	}
+}
+
+// Инициализация системы
+void system_init(void) {
+	DDRA = 0xFF;
+	DDRB = 0xFF;
+	DDRD = 0xFF;
+	DDRC = 0xF3;
+
+	PORTA = 0x00;
+	PORTB = 0x00;
+	PORTD = 0x00;
+	PORTC = (1 << BUTTON_SELECT_PIN) | (1 << BUTTON_START_PIN);
+
+	PORTC |= (1 << CE_PIN) | (1 << WE_PIN) | (1 << OE_PIN);
+	power_off_memory();
+
+	// I2C 100 КГц
+	TWSR = 0x00;
+	TWBR = 72;
+	TWCR = (1 << TWEN);
+}
+
+// Конфигурация контроллера памяти для выбранного типа
+void configure_memory_controller(memory_type_t type) {
+	memory_config_t cfg = mem_config[type];
+
+	if (cfg.is_dram) {
+		PORTC |= (1 << RAS_PIN) | (1 << CAS_PIN) | (1 << WE_PIN);
+	} else {
+		PORTC |= (1 << WE_PIN) | (1 << OE_PIN);
+
+		if(cfg.ce_config == 0x01) {
+			PORTC |= (1 << CE_PIN);
+		} else {
+			PORTC &= ~(1 << CE_PIN);
+		}
+
+		if(!cfg.is_dip28) {
+			PORTD &= 0xF0;
+		}
 	}
 }
 
@@ -305,117 +352,6 @@ void power_off_memory(void) {
 	PORTB = 0;
 	PORTD = 0;
 	PORTC &= ~((1 << VCC_PIN) | (1 << OE_PIN) | (1 << CE_PIN) | (1 << WE_PIN));
-}
-
-// Инициализация системы
-void system_init(void) {
-	DDRA = 0xFF;
-	DDRB = 0xFF;
-	DDRD = 0xFF;
-	DDRC = 0xF3;
-	
-	PORTA = 0x00;
-	PORTB = 0x00;
-	PORTD = 0x00;
-	PORTC = (1 << BUTTON_SELECT_PIN) | (1 << BUTTON_START_PIN);
-	
-	PORTC |= (1 << CE_PIN) | (1 << WE_PIN) | (1 << OE_PIN);
-	power_off_memory();
-	
-	TWSR = 0x00;
-	TWBR = 72;
-	TWCR = (1 << TWEN);
-}
-
-// Конфигурация контроллера памяти для выбранного типа
-void configure_memory_controller(memory_type_t type) {
-	memory_config_t cfg = mem_config[type];
-	
-	if (cfg.is_dram) {
-		PORTC |= (1 << RAS_PIN) | (1 << CAS_PIN) | (1 << WE_PIN);
-	} else {
-		PORTC |= (1 << WE_PIN) | (1 << OE_PIN);
-		
-		if(cfg.ce_config == 0x01) {
-			PORTC |= (1 << CE_PIN);
-		} else {
-			PORTC &= ~(1 << CE_PIN);
-		}
-		
-		if(!cfg.is_dip28) {
-			PORTD &= 0xF0;
-		}
-	}
-}
-
-// Запись данных в память
-void memory_write(uint16_t address, uint8_t data) {
-	if (mem_config[current_mem_type].use_a13_as_cs) {
-		address |= (1 << 13);
-	}
-		
-	PORTA = address & 0xFF;
-		
-	if (mem_config[current_mem_type].is_dip28) {
-		PORTD = (address >> 8) & 0x7F;
-	} else {
-		PORTD = (PORTD & 0xF0) | ((address >> 8) & 0x0F);
-	}
-		
-	if (mem_config[current_mem_type].ce_config == 0x01) {
-		PORTC &= ~(1 << CE_PIN);
-	}
-		
-	PORTB = data;
-	_delay_us(10);
-		
-	PORTC &= ~(1 << WE_PIN);
-	_delay_us(10);
-	PORTC |= (1 << WE_PIN);
-	_delay_us(10);
-		
-	if (mem_config[current_mem_type].ce_config == 0x01) {
-		PORTC |= (1 << CE_PIN);
-	}
-}
-
-// Чтение данных из памяти
-uint8_t memory_read(uint16_t address) {
-	uint8_t data;
-		
-	if (mem_config[current_mem_type].use_a13_as_cs) {
-		address |= (1 << 13);
-	}
-		
-	PORTA = address & 0xFF;
-		
-	if (mem_config[current_mem_type].is_dip28) {
-		PORTD = (address >> 8) & 0x7F;
-	} else {
-		PORTD = (PORTD & 0xF0) | ((address >> 8) & 0x0F);
-	}
-		
-	if (mem_config[current_mem_type].ce_config == 0x01) {
-		PORTC &= ~(1 << CE_PIN);
-	}
-		
-	DDRB = 0x00;
-	PORTB = 0xFF;
-	_delay_us(5);
-		
-	PORTC &= ~(1 << OE_PIN);
-	_delay_us(10);
-	data = PINB;
-	PORTC |= (1 << OE_PIN);
-		
-	if (mem_config[current_mem_type].ce_config == 0x01) {
-		PORTC |= (1 << CE_PIN);
-	}
-		
-	DDRB = 0xFF;
-	PORTB = 0x00;
-		
-	return data;
 }
 
 // Получение размера памяти в байтах
@@ -441,250 +377,176 @@ void get_dram_address_bits(memory_type_t type, uint8_t* row_bits, uint8_t* col_b
     *col_bits = mux_value;
 }
 
+// Запись данных в память
+void sram_memory_write(uint16_t address, uint8_t data) {
+	if (mem_config[current_mem_type].use_a13_as_cs) {
+		address |= (1 << 13);
+	}
+
+	PORTA = address & 0xFF;
+
+	if (mem_config[current_mem_type].is_dip28) {
+		PORTD = (address >> 8) & 0x7F;
+	} else {
+		PORTD = (PORTD & 0xF0) | ((address >> 8) & 0x0F);
+	}
+
+	if (mem_config[current_mem_type].ce_config == 0x01) {
+		PORTC &= ~(1 << CE_PIN);
+	}
+
+	PORTB = data;
+	_delay_us(10);
+
+	PORTC &= ~(1 << WE_PIN);
+	_delay_us(10);
+	PORTC |= (1 << WE_PIN);
+	_delay_us(10);
+
+	if (mem_config[current_mem_type].ce_config == 0x01) {
+		PORTC |= (1 << CE_PIN);
+	}
+}
+
+// Чтение данных из памяти
+uint8_t sram_memory_read(uint16_t address) {
+	uint8_t data;
+
+	if (mem_config[current_mem_type].use_a13_as_cs) {
+		address |= (1 << 13);
+	}
+
+	PORTA = address & 0xFF;
+
+	if (mem_config[current_mem_type].is_dip28) {
+		PORTD = (address >> 8) & 0x7F;
+	} else {
+		PORTD = (PORTD & 0xF0) | ((address >> 8) & 0x0F);
+	}
+
+	if (mem_config[current_mem_type].ce_config == 0x01) {
+		PORTC &= ~(1 << CE_PIN);
+	}
+
+	DDRB = 0x00;
+	PORTB = 0xFF;
+	_delay_us(5);
+
+	PORTC &= ~(1 << OE_PIN);
+	_delay_us(10);
+	data = PINB;
+	PORTC |= (1 << OE_PIN);
+
+	if (mem_config[current_mem_type].ce_config == 0x01) {
+		PORTC |= (1 << CE_PIN);
+	}
+
+	DDRB = 0xFF;
+	PORTB = 0x00;
+
+	return data;
+}
+
 // Конфигурация портов для работы с DRAM
 void configure_dram_ports(void) {
-    // PORTA - адресные линии (A0-A7 для строк/столбцов)
-    DDRA = 0xFF;
-    PORTA = 0x00;
-    
-    // PORTB:
-    // PB0 - Dout (вход)
-    // PB1 - Din (выход)
-    // PB2-PB7 - высокоимпедансное состояние (Z-состояние)
-    DDRB = (1 << DRAM_DIN_PIN);  // Только PB1 как выход, остальные как входы
-    PORTB = 0x00;                // Отключаем подтяжку на всех входах
-    
-    // PORTC - управляющие сигналы
+    // Настройка портов для адресов строк и столбцов
+    DDRA = 0xFF;  // PORTA - младшие 8 бит адреса (мультиплексированные строки/столбцы)
+	PORTA = 0x00;
+    DDRD = 0xFF;  // PORTD - старшие биты адреса (если нужны для больших DRAM)
+	PORTD = 0X00;
+
+    // Настройка порта данных
+    DDRB |= DRAM_DATA;  // PB0 как выход для записи
+	PORTB &= ~DRAM_DATA;  // По умолчанию 0
+
+    // Настройка управляющих сигналов
     DDRC |= (1 << RAS_PIN) | (1 << CAS_PIN) | (1 << WE_PIN);
+
+    // Установка начального состояния сигналов
     PORTC |= (1 << RAS_PIN) | (1 << CAS_PIN) | (1 << WE_PIN);
 }
 
-// Цикл регенерации DRAM
-void dram_refresh_cycle(uint8_t row) {
-    // Precharge
-    PORTC &= ~(1 << WE_PIN);
-    PORTC &= ~(1 << RAS_PIN);
-    _delay_us(DRAM_RAS_PRECHARGE_US);
-    PORTC |= (1 << RAS_PIN) | (1 << WE_PIN);
-    
-    // Activate row (refresh)
+// Запись бита в DRAM
+void dram_write_bit(uint8_t row, uint8_t col, uint8_t data_bit) {
+    // Настройка порта данных на выход
+    DDRB |= DRAM_DATA;
+
+    // Подача адреса строки
     PORTA = row;
+
+    // Активация RAS (защелкиваем адрес строки)
     PORTC &= ~(1 << RAS_PIN);
     _delay_us(DRAM_RAS_PRECHARGE_US);
-    
-    // Precharge
-    PORTC &= ~(1 << WE_PIN);
+
+    // Подача адреса столбца
+    PORTA = col;
+
+    // Установка данных
+    if (data_bit) {
+        PORTB |= DRAM_DATA;
+    } else {
+        PORTB &= ~DRAM_DATA;
+    }
+
+    // Активация CAS и WE (цикл записи)
+    PORTC &= ~((1 << CAS_PIN) | (1 << WE_PIN));
+    _delay_us(DRAM_CAS_DELAY_US);
+
+    // Деактивация CAS и WE
+    PORTC |= (1 << CAS_PIN) | (1 << WE_PIN);
+    _delay_us(DRAM_CAS_DELAY_US);
+
+    // Деактивация RAS
     PORTC |= (1 << RAS_PIN);
     _delay_us(DRAM_RAS_PRECHARGE_US);
-    PORTC |= (1 << WE_PIN);
 }
 
-// Запись бита в DRAM с регенерацией
-void dram_write_bit(uint8_t row, uint8_t col, uint8_t data_bit) {
-    // Precharge
-    PORTC &= ~(1 << WE_PIN);
-    PORTC &= ~(1 << RAS_PIN);
-    _delay_us(DRAM_RAS_PRECHARGE_US);
-    PORTC |= (1 << RAS_PIN) | (1 << WE_PIN);
-    
-    // Activate row
-    PORTA = row;
-    PORTC &= ~(1 << RAS_PIN);
-    _delay_us(DRAM_RAS_PRECHARGE_US);
-    
-    // Write column with data bit
-    PORTA = col;
-    
-    // Установка бита данных на входной пин
-    if (data_bit) {
-        PORTB |= DRAM_DIN_MASK;
-    } else {
-        PORTB &= ~DRAM_DIN_MASK;
-    }
-    
-    PORTC &= ~(1 << CAS_PIN);
-    PORTC &= ~(1 << WE_PIN);
-    _delay_us(DRAM_CAS_DELAY_US);
-    
-    // Restore signals
-    PORTC |= (1 << CAS_PIN) | (1 << WE_PIN) | (1 << RAS_PIN);
-    
-    // Выполнить регенерацию каждые N операций
-    dram_refresh_counter++;
-    if (dram_refresh_counter >= DRAM_REFRESH_INTERVAL) { // Регенерировать каждые 64 операции
-        dram_refresh_cycle(row);
-        dram_refresh_counter = 0;
-    }
-}
-
-// Чтение бита из DRAM с регенерацией
+// Чтение бита из DRAM
 uint8_t dram_read_bit(uint8_t row, uint8_t col) {
     uint8_t data_bit;
-    
-    // Precharge
-    PORTC &= ~(1 << WE_PIN);
-    PORTC &= ~(1 << RAS_PIN);
-    _delay_us(DRAM_RAS_PRECHARGE_US);
-    PORTC |= (1 << RAS_PIN) | (1 << WE_PIN);
-    
-    // Activate row
+
+    // Настройка порта данных на вход
+    DDRB &= ~DRAM_DATA;
+    PORTB &= ~DRAM_DATA; // отключить подтяжку
+
+    // Подача адреса строки
     PORTA = row;
+
+    // Активация RAS (защелкиваем адрес строки)
     PORTC &= ~(1 << RAS_PIN);
     _delay_us(DRAM_RAS_PRECHARGE_US);
-    
-    // Read column
+
+    // Подача адреса столбца
     PORTA = col;
-    
-    // Настройка вывода данных как входа
-    DDRB &= ~DRAM_DOUT_MASK;
-    PORTB &= ~DRAM_DOUT_MASK;
-    
+
+    // Активация CAS (цикл чтения)
     PORTC &= ~(1 << CAS_PIN);
     _delay_us(DRAM_CAS_DELAY_US);
-    
-    // Чтение бита с выходного пина
-    data_bit = (PINB & DRAM_DOUT_MASK) ? 1 : 0;
-    
-    PORTC |= (1 << CAS_PIN) | (1 << RAS_PIN);
-    
-    // Восстановление PORTB как выхода
-    DDRB |= (0xFF & ~DRAM_DOUT_MASK);
-    
-    // Выполнить регенерацию каждые N операций
-    dram_refresh_counter++;
-    if (dram_refresh_counter >= DRAM_REFRESH_INTERVAL) {
-        dram_refresh_cycle(row);
-        dram_refresh_counter = 0;
-    }
+
+    // Чтение данных
+    data_bit = (PINB & DRAM_DATA) ? 1 : 0;
+
+    // Деактивация CAS
+    PORTC |= (1 << CAS_PIN);
+    _delay_us(DRAM_CAS_DELAY_US);
+
+    // Деактивация RAS
+    PORTC |= (1 << RAS_PIN);
+    _delay_us(DRAM_RAS_PRECHARGE_US);
+
     return data_bit;
-}  
-	
-// Тест DRAM: запись и чтение единиц
-uint16_t dram_test_single_bit(memory_type_t type) {
-    uint8_t row_bits, col_bits;
-    get_dram_address_bits(type, &row_bits, &col_bits);
-    
-    uint8_t max_row = (1 << row_bits) - 1;
-    uint8_t max_col = (1 << col_bits) - 1;
-
-    lcd_print_at(0, 2, "DRAM Test: Bit 1    ");
-    
-    for (uint8_t row = 0; row <= max_row; row++) {
-        for (uint8_t col = 0; col <= max_col; col++) {
-            // Запись 1
-            dram_write_bit(row, col, 1);
-            uint8_t read_data = dram_read_bit(row, col);
-            
-            if (read_data != 1) {
-                uint16_t error_addr = (row << 8) | col;
-                test_failed_message(1, error_addr, 1, read_data);
-                return error_addr;
-            }
-        }
-        // Прогресс
-        if ((row & 0x0F) == 0) {
-            display_progress(row << 8);
-        }
-    }
-    test_complete_message(1, (max_row << 8) | max_col);
-    return UINT_MAX;
 }
 
-// Тест DRAM: чередующиеся 0 и 1
-uint16_t dram_test_alternating(memory_type_t type) {
-    uint8_t row_bits, col_bits;
-    get_dram_address_bits(type, &row_bits, &col_bits);
-    
-    uint8_t max_row = (1 << row_bits) - 1;
-    uint8_t max_col = (1 << col_bits) - 1;
-
-    lcd_print_at(0, 2, "DRAM Test: 0/1 Alt ");
-    
-    for (uint8_t row = 0; row <= max_row; row++) {
-        for (uint8_t col = 0; col <= max_col; col++) {
-            uint8_t expected = (row + col) & 0x01;  // Чередование 0/1
-            dram_write_bit(row, col, expected);
-            uint8_t read_data = dram_read_bit(row, col);
-            
-            if (read_data != expected) {
-                uint16_t error_addr = (row << 8) | col;
-                test_failed_message(2, error_addr, expected, read_data);
-                return error_addr;
-            }
-        }
-        if ((row & 0x0F) == 0) {
-            display_progress(row << 8);
-        }
-    }
-    test_complete_message(2, (max_row << 8) | max_col);
-    return UINT_MAX;
-}
-
-// Полная регенерация всех строк DRAM
-void dram_full_refresh(memory_type_t type) {
-	if (!mem_config[type].is_dram) return;
-	
-    uint8_t row_bits, col_bits;
-    get_dram_address_bits(type, &row_bits, &col_bits);
-    uint8_t max_row = (1 << row_bits) - 1;
-    
-    for (uint8_t row = 0; row <= max_row; row++) {
-        dram_refresh_cycle(row);
-        _delay_us(10);
-    }
-}
-
-// Запуск тестов для DRAM памяти
-void run_dram_tests(memory_type_t type) {
-    configure_dram_ports();
+// Запуск всех тестов памяти
+void run_memory_tests(memory_type_t type) {
+    configure_memory_controller(type);
     power_on_memory();
-    _delay_ms(200); // Стабилизация питания
-    
-    lcd_print_at(0, 2, "Testing DRAM...     ");
-    lcd_print_at(0, 3, "Please wait...      ");
-    _delay_ms(500);
 
-    // Просто запускаем тесты последовательно
-    if (dram_test_single_bit(type) != UINT_MAX) {
-        return;
+    if (mem_config[type].is_dram) {
+        run_dram_tests(type);
+    } else {
+		run_sram_tests(type);
     }
-    
-    if (dram_test_alternating(type) != UINT_MAX) {
-        return;
-    }
-    
-    lcd_print_at(0, 2, "DRAM TESTS PASSED!  ");
-    lcd_print_at(0, 3, "Memory OK!          ");
-    _delay_ms(3000);
-    power_off_memory();
-}
-
-// Вывод сообщения об ошибке теста
-void test_failed_message(uint8_t test, uint16_t error_address, uint8_t error_written, uint8_t error_read) {
-	power_off_memory();
-	char test_line[20];
-	sprintf(test_line, "Test %d FAILED       ", test);
-	lcd_print_at(0, 2, test_line);
-	
-	char buf[17];
-	sprintf(buf, "A:%04X W:%02X R:%02X", error_address, error_written, error_read);
-	lcd_print_at(0, 3, buf);
-	_delay_ms(3000);
-}
-
-// Отображение прогресса тестирования
-void display_progress(uint16_t address) {
-    char progress_buf[6];
-    sprintf(progress_buf, "%04X", address);
-    lcd_print_at(16, 2, progress_buf);
-}
-
-// Вывод сообщения об успешном завершении теста
-void test_complete_message(uint8_t test_number, uint16_t address) {
-    char pass_buf[20];
-    sprintf(pass_buf, "Test %d: PASS    %04X", test_number, address);
-    lcd_print_at(0, 2, pass_buf);
-	_delay_ms(500);	
 }
 
 // Тест 1: запись и чтение шаблона 0x55
@@ -694,8 +556,8 @@ uint16_t sram_test1(memory_type_t type) {
 	lcd_print_at(0, 2, "Test 1: 0x55        ");
 	for (uint16_t address = 0; address < memory_size; address++) {
 		if (!is_valid_address(type, address)) continue;
-		memory_write(address, 0x55);
-		uint8_t read_data = memory_read(address);
+		sram_memory_write(address, 0x55);
+		uint8_t read_data = sram_memory_read(address);
 		if (read_data != 0x55) {
 			test_failed_message(1, address, 0x55, read_data);
 			return address;
@@ -715,8 +577,8 @@ uint16_t sram_test2(memory_type_t type) {
     lcd_print_at(0, 2, "Test 2: 0xAA        ");
     for (uint16_t address = 0; address < memory_size; address++) {
         if (!is_valid_address(type, address)) continue;
-        memory_write(address, 0xAA);
-        uint8_t read_data = memory_read(address);
+        sram_memory_write(address, 0xAA);
+        uint8_t read_data = sram_memory_read(address);
         if (read_data != 0xAA) {
             test_failed_message(2, address, 0xAA, read_data);
             return address;
@@ -737,8 +599,8 @@ uint16_t sram_test3(memory_type_t type) {
     for (uint16_t address = 0; address < memory_size; address++) {
         if (!is_valid_address(type, address)) continue;
         uint8_t pattern = address & 0xFF;
-        memory_write(address, pattern);
-        uint8_t read_data = memory_read(address);
+        sram_memory_write(address, pattern);
+        uint8_t read_data = sram_memory_read(address);
         if (read_data != pattern) {
             test_failed_message(3, address, pattern, read_data);
             return address;
@@ -759,8 +621,8 @@ uint16_t sram_test4(memory_type_t type) {
     for (uint16_t address = 0; address < memory_size; address++) {
         if (!is_valid_address(type, address)) continue;
         uint8_t pattern = ~(address & 0xFF);
-        memory_write(address, pattern);
-        uint8_t read_data = memory_read(address);
+        sram_memory_write(address, pattern);
+        uint8_t read_data = sram_memory_read(address);
         if (read_data != pattern) {
             test_failed_message(4, address, pattern, read_data);
             return address;
@@ -773,33 +635,140 @@ uint16_t sram_test4(memory_type_t type) {
     return UINT_MAX;
 }
 
-// Запуск всех тестов памяти
-void run_memory_tests(memory_type_t type) {
-    configure_memory_controller(type);
-    power_on_memory();
-    _delay_ms(200);
-    
-    if (mem_config[type].is_dram) {
-        run_dram_tests(type);
-    } else {
-        lcd_print_at(0, 2, "Testing memory...   ");
-        lcd_print_at(0, 3, "Please wait...      ");
-        _delay_ms(500);
+// Запуск тестов для SRAM памяти
+void run_sram_tests(memory_type_t type) {
+    lcd_print_at(0, 2, "Testing memory...   ");
+    lcd_print_at(0, 3, "Please wait...      ");
+    _delay_ms(500);
 
-        uint16_t (*test_functions[])(memory_type_t) = {
-            sram_test1, sram_test2, sram_test3, sram_test4
-        };
-        
-        for (uint8_t i = 0; i < 4; i++) {
-            if (test_functions[i](type) != UINT_MAX) {
-                return;
+    uint16_t (*test_functions[])(memory_type_t) = {
+        sram_test1, sram_test2, sram_test3, sram_test4
+    };
+
+    for (uint8_t i = 0; i < 4; i++) {
+        if (test_functions[i](type) != UINT_MAX) {
+            return;
+        }
+    }
+    power_off_memory();
+    lcd_print_at(0, 2, "SRAM TESTS PASSED!  ");
+    lcd_print_at(0, 3, "Memory OK!          ");
+    _delay_ms(3000);
+}
+
+// Тест DRAM: запись и чтение единиц
+uint16_t dram_test_single_bit(memory_type_t type) {
+    uint8_t row_bits, col_bits;
+    get_dram_address_bits(type, &row_bits, &col_bits);
+
+    uint8_t max_row = (1 << row_bits);
+    uint8_t max_col = (1 << col_bits);
+
+    lcd_print_at(0, 2, "DRAM Test: Bit 1    ");
+
+    for (uint8_t row = 0; row < max_row; row++) {
+        for (uint8_t col = 0; col < max_col; col++) {
+            // Запись 1
+            dram_write_bit(row, col, 1);
+            uint8_t read_data = dram_read_bit(row, col);
+
+            if (read_data != 1) {
+                uint16_t error_addr = (row << 8) | col;
+                test_failed_message(1, error_addr, 1, read_data);
+                return error_addr;
             }
         }
-	    power_off_memory();        
-        lcd_print_at(0, 2, "ALL TESTS PASSED!   ");
-        lcd_print_at(0, 3, "Memory OK!          ");
-        _delay_ms(3000);
+        // Прогресс
+        if ((row & 0x0F) == 0) {
+            display_progress(row << 8);
+        }
     }
+    test_complete_message(1, (max_row << 8) | max_col);
+    return UINT_MAX;
+}
+
+// Тест DRAM: чередующиеся 0 и 1
+uint16_t dram_test_alternating(memory_type_t type) {
+    uint8_t row_bits, col_bits;
+    get_dram_address_bits(type, &row_bits, &col_bits);
+
+    uint8_t max_row = (1 << row_bits);
+    uint8_t max_col = (1 << col_bits);
+
+    lcd_print_at(0, 2, "DRAM Test: 0/1 Alt ");
+
+    for (uint8_t row = 0; row < max_row; row++) {
+        for (uint8_t col = 0; col < max_col; col++) {
+            uint8_t expected = (row + col) & 0x01;  // Чередование 0/1
+            dram_write_bit(row, col, expected);
+            uint8_t read_data = dram_read_bit(row, col);
+
+            if (read_data != expected) {
+                uint16_t error_addr = (row << 8) | col;
+                test_failed_message(2, error_addr, expected, read_data);
+                return error_addr;
+            }
+        }
+        if ((row & 0x0F) == 0) {
+            display_progress(row << 8);
+        }
+    }
+    test_complete_message(2, (max_row << 8) | max_col);
+    return UINT_MAX;
+}
+
+// Запуск тестов для DRAM памяти
+void run_dram_tests(memory_type_t type) {
+    configure_dram_ports();
+    power_on_memory();
+
+    lcd_print_at(0, 2, "Testing DRAM...     ");
+    lcd_print_at(0, 3, "Please wait...      ");
+    _delay_ms(50);
+
+    // Просто запускаем тесты последовательно
+    if (dram_test_single_bit(type) != UINT_MAX) {
+		power_off_memory();
+        return;
+    }
+
+    if (dram_test_alternating(type) != UINT_MAX) {
+		power_off_memory();
+        return;
+    }
+
+	power_off_memory();
+	lcd_print_at(0, 2, "DRAM TESTS PASSED!  ");
+    lcd_print_at(0, 3, "Memory OK!          ");
+    _delay_ms(3000);
+}
+
+// Отображение прогресса тестирования
+void display_progress(uint16_t address) {
+    char progress_buf[6];
+    sprintf(progress_buf, "%04X", address);
+    lcd_print_at(16, 2, progress_buf);
+}
+
+// Вывод сообщения об успешном завершении теста
+void test_complete_message(uint8_t test_number, uint16_t address) {
+    char pass_buf[20];
+    sprintf(pass_buf, "Test %d: PASS    %04X", test_number, address);
+    lcd_print_at(0, 2, pass_buf);
+	_delay_ms(500);
+}
+
+// Вывод сообщения об ошибке теста
+void test_failed_message(uint8_t test, uint16_t error_address, uint8_t error_written, uint8_t error_read) {
+	power_off_memory();
+	char test_line[20];
+	sprintf(test_line, "Test %d FAILED       ", test);
+	lcd_print_at(0, 2, test_line);
+
+	char buf[17];
+	sprintf(buf, "A:%04X W:%02X R:%02X", error_address, error_written, error_read);
+	lcd_print_at(0, 3, buf);
+	_delay_ms(3000);
 }
 
 // Главная функция программы
