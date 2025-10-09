@@ -476,7 +476,7 @@ void dram_write_bit(uint8_t row, uint8_t col, uint8_t data_bit) {
 
     // Активация RAS (защелкиваем адрес строки)
     PORTC &= ~(1 << RAS_PIN);
-    _delay_us(DRAM_RAS_PRECHARGE_US);
+    asm volatile ("nop");  // t_RCD = 20-30 нс (RAS to CAS delay)
 
     // Подача адреса столбца
     PORTA = col;
@@ -490,15 +490,15 @@ void dram_write_bit(uint8_t row, uint8_t col, uint8_t data_bit) {
 
     // Активация CAS и WE (цикл записи)
     PORTC &= ~((1 << CAS_PIN) | (1 << WE_PIN));
-    _delay_us(DRAM_CAS_DELAY_US);
+    asm volatile ("nop");  // t_WP = 20-30 нс (Write pulse width)
 
     // Деактивация CAS и WE
     PORTC |= (1 << CAS_PIN) | (1 << WE_PIN);
-    _delay_us(DRAM_CAS_DELAY_US);
+    asm volatile ("nop");  // t_DH = 10 нс (Data hold time)
 
     // Деактивация RAS
     PORTC |= (1 << RAS_PIN);
-    _delay_us(DRAM_RAS_PRECHARGE_US);
+    asm volatile ("nop");  // t_RAS = 60-100 нс (RAS pulse width)
 }
 
 // Чтение бита из DRAM
@@ -514,25 +514,25 @@ uint8_t dram_read_bit(uint8_t row, uint8_t col) {
 
     // Активация RAS (защелкиваем адрес строки)
     PORTC &= ~(1 << RAS_PIN);
-    _delay_us(DRAM_RAS_PRECHARGE_US);
+    asm volatile ("nop");  // t_RCD = 20-30 нс (RAS to CAS delay)
 
     // Подача адреса столбца
     PORTA = col;
 
     // Активация CAS (цикл чтения)
     PORTC &= ~(1 << CAS_PIN);
-    _delay_us(DRAM_CAS_DELAY_US);
+    asm volatile ("nop");  // t_CAC = 20-30 нс (CAS access time)
 
     // Чтение данных
     data_bit = (PINB & DRAM_DATA) ? 1 : 0;
 
     // Деактивация CAS
     PORTC |= (1 << CAS_PIN);
-    _delay_us(DRAM_CAS_DELAY_US);
+    asm volatile ("nop");  // t_OFF = 10 нс (Output disable time)
 
     // Деактивация RAS
     PORTC |= (1 << RAS_PIN);
-    _delay_us(DRAM_RAS_PRECHARGE_US);
+    asm volatile ("nop");  // t_RP = 20-30 нс (RAS precharge time)
 
     return data_bit;
 }
