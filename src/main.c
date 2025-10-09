@@ -253,7 +253,7 @@ void lcd_init(void) {
 	lcd_send_byte(0x01, 0);
 	_delay_ms(2);
 	lcd_send_byte(0x06, 0);
-	_ddelay_ms(1);
+	_delay_ms(1);
 }
 
 // Вывод строки на LCD
